@@ -1,0 +1,214 @@
+name: Build LocateAnything Windows Vulkan
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout mtmd-grounders
+        uses: actions/checkout@v4
+        with:
+          ref: mtmd-grounders
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          choco install vulkan-sdk -y --no-progress
+
+          $vulkanSdk = :GetEnvironmentVariable(
+            "VULKAN_SDK",
+            "Machine"
+          )
+
+          if (-not $vulkanSdk) {
+            $vulkanSdk = Get-ChildItem "C:\VulkanSDK" `
+              -Directory `
+              -ErrorAction SilentlyContinue |
+              Sort-Object Name -Descending |
+              Select-Object -First 1 `
+              -ExpandProperty FullName
+          }
+
+          if (-not $vulkanSdk) {
+            throw "Vulkan SDK installation was not found."
+          }
+
+          "VULKAN_SDK=$vulkanSdk" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Encoding utf8 `
+              -Append
+
+          "$vulkanSdk\Bin" |
+            Out-File `
+              -FilePath $env:GITHUB_PATH `
+              -Encoding utf8 `
+              -Append
+
+          Write-Host "VULKAN_SDK=$vulkanSdk"
+
+          Get-ChildItem "$vulkanSdk\Bin" |
+            Where-Object {
+              $_.Name -match "glslc|glslangValidator"
+            } |
+            Select-Object Name, FullName
+
+      - name: Verify Vulkan SDK
+        shell: pwsh
+        run: |
+          Write-Host "VULKAN_SDK=$env:VULKAN_SDK"
+
+          if (-not (Test-Path "$env:VULKAN_SDK\Include\vulkan\vulkan.h")) {
+            throw "Vulkan header was not found."
+          }
+
+          if (-not (Test-Path "$env:VULKAN_SDK\Lib\vulkan-1.lib")) {
+            throw "Vulkan import library was not found."
+          }
+
+          $glslc = Get-Command glslc.exe -ErrorAction SilentlyContinue
+
+          if ($glslc) {
+            Write-Host "glslc: $($glslc.Source)"
+            glslc.exe --version
+          }
+          else {
+            $glslang = Get-Command `
+              glslangValidator.exe `
+              -ErrorAction SilentlyContinue
+
+            if (-not $glslang) {
+              throw "No Vulkan shader compiler was found."
+            }
+
+            Write-Host "glslangValidator: $($glslang.Source)"
+            glslangValidator.exe --version
+          }
+
+      - name: Configure Vulkan build
+        shell: pwsh
+        run: |
+          cmake `
+            -S . `
+            -B build `
+            -A x64 `
+            -DGGML_VULKAN=ON `
+            -DGGML_NATIVE=OFF `
+            -DGGML_AVX2=ON `
+            -DLLAMA_CURL=OFF `
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build server and mtmd CLI
+        shell: pwsh
+        run: |
+          cmake `
+            --build build `
+            --config Release `
+            --target llama-server llama-mtmd-cli `
+            --parallel 2
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $releaseDir = "build\bin\Release"
+
+          if (-not (Test-Path $releaseDir)) {
+            Write-Host "Expected release directory was not found."
+
+            Get-ChildItem build `
+              -Recurse `
+              -File |
+              Select-Object FullName, Length
+
+            throw "Build output directory is missing."
+          }
+
+          $requiredFiles = @(
+            "llama-server.exe",
+            "llama-mtmd-cli.exe"
+          )
+
+          foreach ($file in $requiredFiles) {
+            $fullPath = Join-Path $releaseDir $file
+
+            if (-not (Test-Path $fullPath)) {
+              throw "Required build output is missing: $fullPath"
+            }
+          }
+
+          $vulkanBackend = Get-ChildItem $releaseDir `
+            -File `
+            -Filter "*vulkan*.dll" `
+            -ErrorAction SilentlyContinue
+
+          if (-not $vulkanBackend) {
+            Write-Host "Release directory contents:"
+
+            Get-ChildItem $releaseDir `
+              -File |
+              Select-Object Name, Length
+
+            throw "Vulkan backend DLL was not found."
+          }
+
+          Write-Host "Vulkan backend found:"
+
+          $vulkanBackend |
+            Select-Object Name, Length
+
+      - name: Collect Vulkan artifacts
+        shell: pwsh
+        run: |
+          $releaseDir = "build\bin\Release"
+          $artifactDir = "artifact"
+
+          New-Item `
+            -ItemType Directory `
+            -Path $artifactDir `
+            -Force |
+            Out-Null
+
+          Copy-Item `
+            -Path "$releaseDir\*" `
+            -Destination $artifactDir `
+            -Recurse `
+            -Force
+
+          Write-Host "Artifact contents:"
+
+          Get-ChildItem $artifactDir `
+            -Recurse `
+            -File |
+            Sort-Object Name |
+            Select-Object Name, Length, FullName
+
+      - name: Smoke test binaries
+        shell: pwsh
+        run: |
+          $env:PATH = "$(Resolve-Path artifact);$env:PATH"
+
+          & ".\artifact\llama-server.exe" --version
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "llama-server.exe smoke test failed."
+          }
+
+          & ".\artifact\llama-mtmd-cli.exe" --help |
+            Select-Object -First 20
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "llama-mtmd-cli.exe smoke test failed."
+          }
+
+      - name: Upload Windows Vulkan build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocateAnything-llama-windows-vulkan
+          path: artifact
+          if-no-files-found: error
+          retention-days: 7

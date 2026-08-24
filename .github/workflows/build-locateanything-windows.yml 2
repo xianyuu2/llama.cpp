@@ -1,0 +1,51 @@
+name: Build LocateAnything Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout mtmd-grounders
+        uses: actions/checkout@v4
+        with:
+          ref: mtmd-grounders
+          submodules: recursive
+
+      - name: Configure CPU build
+        shell: pwsh
+        run: >
+          cmake -S . -B build
+          -A x64
+          -DLLAMA_CURL=OFF
+          -DGGML_NATIVE=OFF
+          -DGGML_AVX2=ON
+
+      - name: Build server and mtmd CLI
+        shell: pwsh
+        run: >
+          cmake --build build
+          --config Release
+          --target llama-server llama-mtmd-cli
+          --parallel 2
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifact
+
+          Get-ChildItem build -Recurse -File |
+            Where-Object {
+              $_.Extension -in ".exe", ".dll"
+            } |
+            Copy-Item -Destination artifact -Force
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocateAnything-llama-windows-cpu
+          path: artifact
+          if-no-files-found: error
+          retention-days: 7

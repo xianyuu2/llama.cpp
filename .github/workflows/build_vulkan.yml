@@ -20,7 +20,7 @@ jobs:
         run: |
           choco install vulkan-sdk -y --no-progress
 
-          $vulkanSdk = :GetEnvironmentVariable(
+          $vulkanSdk = [System.Environment]::GetEnvironmentVariable(
             "VULKAN_SDK",
             "Machine"
           )
